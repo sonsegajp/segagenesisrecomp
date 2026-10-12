@@ -31,6 +31,7 @@
 #include "audio.h"
 #include "cosim.h"
 #include "png_write.h"
+#include "crt_present.h"   /* present-only CRT filters (genesis_present_set_crt / GENESIS_CRT) */
 
 /* =========================================================================
  * Path helper: resolve filenames relative to the exe directory.
@@ -2207,6 +2208,10 @@ int main(int argc, char *argv[])
 #endif
     }
 
+    if (!rom_path && g_game_spec.resolve_rom) {
+        rom_path = g_game_spec.resolve_rom();
+        if (!rom_path) return 0;
+    }
     if (!rom_path) {
 #ifdef _WIN32
         static char picked_path[512] = {0};
@@ -2905,7 +2910,7 @@ session_begin:;
             if (ev.type == SDL_QUIT) { fprintf(stderr, "[session] SDL_QUIT received\n"); running = 0; }
             if (ev.type == SDL_KEYDOWN) {
 #if !RECOMP_LAUNCHER
-                if (ev.key.keysym.sym == SDLK_ESCAPE) running = 0;
+                if (ev.key.keysym.sym == SDLK_ESCAPE && !g_game_spec.keep_escape) running = 0;
 #endif
 
                 /* Fullscreen toggle: F11, Alt+Enter, or Cmd/Ctrl+F.
@@ -3422,7 +3427,31 @@ session_begin:;
             }
             peer_view_was_active = peer_view_is_active;
         }
-        SDL_RenderCopy(renderer, frame_texture, &src, NULL);
+        if (!crt_present(renderer, frame_texture, &src, s_frame_texture_filtered))
+            SDL_RenderCopy(renderer, frame_texture, &src, NULL);
+        {   /* development: GENESIS_PRESENT_SNAP=file.png [GENESIS_PRESENT_SNAP_FRAME=n] saves the window */
+            static int snap_frame = -2, presented;
+            static const char *snap_path;
+            if (snap_frame == -2) {
+                snap_path = getenv("GENESIS_PRESENT_SNAP");
+                const char *n = getenv("GENESIS_PRESENT_SNAP_FRAME");
+                snap_frame = snap_path && *snap_path ? (n && *n ? atoi(n) : 600) : -1;
+            }
+            if (snap_frame >= 0 && ++presented == snap_frame) {
+                int ow = 0, oh = 0;
+                SDL_GetRendererOutputSize(renderer, &ow, &oh);
+                uint32_t *px = (uint32_t *)malloc((size_t)ow * oh * 4);
+                SDL_Rect all = { 0, 0, ow, oh };
+                int lw = 0, lh = 0;
+                SDL_RenderGetLogicalSize(renderer, &lw, &lh);
+                SDL_RenderSetLogicalSize(renderer, 0, 0);    /* (read the whole output) */
+                if (px && SDL_RenderReadPixels(renderer, &all, SDL_PIXELFORMAT_ARGB8888, px, ow * 4) == 0)
+                    png_write_argb(snap_path, px, ow, oh, ow);
+                SDL_RenderSetLogicalSize(renderer, lw, lh);
+                free(px);
+                fprintf(stderr, "[present] saved %dx%d window to %s\n", ow, oh, snap_path);
+            }
+        }
 #if GENESIS_HAS_RECOMP_NET
         /* Process the peer INPUT and emit our CONFIRM before the blocking
          * present, so confirmation delivery overlaps vsync as well. */

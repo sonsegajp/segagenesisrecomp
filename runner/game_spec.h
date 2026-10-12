@@ -244,6 +244,13 @@ typedef struct GameSpec {
      * launch is then refused. NULL = nothing to adopt. */
     int       (*netplay_config_adopt)(const char *line);
 
+    /* With no ROM on the command line and no launcher: the game finds its own
+     * (and whatever it needs beside it). Return the ROM path, or NULL to quit
+     * (it has started its own setup instead). NULL = the native file picker. */
+    const char *(*resolve_rom)(void);
+    /* Non-zero: Escape is left to the game (it doesn't quit). */
+    int         keep_escape;
+
     /* Verified-clean native overrides. Native builds typically run
      * with size=0 (everything stays as recompiled C); oracle builds
      * use this to swap interpreter execution for native execution

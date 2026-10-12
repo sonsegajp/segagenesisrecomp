@@ -12,6 +12,8 @@
 
 /* Recompiled 68K memory. */
 extern uint8_t g_rom[0x400000];
+extern uint8_t *g_rom_ext;        /* opt-in expansion ROM at $400000 */
+extern uint32_t g_rom_ext_size;   /* bytes; 0 = none (default) */
 extern uint8_t g_ram[0x010000];
 
 /* Audio write stamps (master cycles since wall-frame start; see
@@ -298,6 +300,8 @@ uint16_t gbus_read16(GenesisBus *b, uint32_t a)
     }
     if (a < 0x400000u)
         return (uint16_t)((g_rom[a] << 8) | g_rom[a + 1]);          /* ROM     */
+    if (a - 0x400000u < g_rom_ext_size)                              /* exp ROM */
+        return (uint16_t)((g_rom_ext[a - 0x400000u] << 8) | g_rom_ext[a - 0x400000u + 1]);
     if (a >= 0xFF0000u) {                                            /* RAM     */
         uint16_t o = (uint16_t)(a & 0xFFFFu);
         return (uint16_t)((g_ram[o] << 8) | g_ram[(uint16_t)(o + 1)]);
@@ -346,6 +350,8 @@ uint16_t gbus_peek16(const GenesisBus *b, uint32_t a)
     }
     if (a < 0x400000u)
         return (uint16_t)((g_rom[a] << 8) | g_rom[a + 1]);
+    if (a - 0x400000u < g_rom_ext_size)
+        return (uint16_t)((g_rom_ext[a - 0x400000u] << 8) | g_rom_ext[a - 0x400000u + 1]);
     if (a >= 0xFF0000u) {
         uint16_t o = (uint16_t)(a & 0xFFFFu);
         return (uint16_t)((g_ram[o] << 8) | g_ram[(uint16_t)(o + 1)]);
