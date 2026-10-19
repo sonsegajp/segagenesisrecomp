@@ -630,6 +630,28 @@ static void custom_video_prepare(void)
     s_custom_width = width;
 }
 
+/* An in-between frame from the game (GameVideo.interpolate) into s_interp_buf,
+ * timing the draw for interp_slots (crt_present.h). 0 when unavailable. */
+static uint32_t *s_interp_buf;
+static size_t s_interp_cap;
+static Uint64 s_work_start;               /* end of the last present: a tick's work begins */
+static int interp_draw(double t)
+{
+    if (!s_custom_width || !g_game_spec.video || !g_game_spec.video->interpolate) return 0;
+    size_t need = (size_t)s_frame_stride * MAX_SCREEN_HEIGHT;
+    if (need > s_interp_cap) {
+        uint32_t *b = (uint32_t *)realloc(s_interp_buf, need * sizeof *b);
+        if (!b) return 0;
+        s_interp_buf = b;
+        s_interp_cap = need;
+    }
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    int ok = g_game_spec.video->interpolate(t, s_interp_buf, s_frame_stride, s_screen_height);
+    double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+    if (ok) s_interp_cost_ms += (ms - s_interp_cost_ms) * 0.2;
+    return ok;
+}
+
 /* Presentation-only debug control for deterministic resize/mode probes. */
 int runner_custom_video_set(const char *mode, int window_w, int window_h)
 {
@@ -3349,8 +3371,18 @@ session_begin:;
          * s_framebuf (the verified/hashed raw VDP output) is never modified. */
         if (!benchmark_frames) {
         const uint32_t *present_src = s_framebuf;
+        /* Frame interpolation: this tick shows n in-between frames from the
+         * previous tick to this one, the first now (crt_present.h). */
+        int interp_n = 1;
+        if (!turbo && !netplay_peer_view_active())
+            interp_n = interp_slots(renderer, target_fps,
+                (double)(SDL_GetPerformanceCounter() - s_work_start) * 1000.0 / (double)perf_frequency);
+        if (interp_n > 1) {
+            if (interp_draw(0.0)) present_src = s_interp_buf;
+            else interp_n = 1;
+        }
         if (s_color_lut_on) {
-            color_lut_map_frame(&s_color_lut, s_framebuf, s_present_buf,
+            color_lut_map_frame(&s_color_lut, present_src, s_present_buf,
                                 s_screen_width, s_screen_height,
                                 MAX_SCREEN_WIDTH);
             present_src = s_present_buf;
@@ -3373,6 +3405,13 @@ session_begin:;
         }
 #endif
         update_render_logical_size(renderer);
+        scale_apply(renderer);
+        {   /* a game's live scaling choice (crt_present.h) overrides linear_filter */
+            int lin = scale_wants_linear();
+            if (lin >= 0 && lin != s_frame_texture_filtered &&
+                SDL_SetTextureScaleMode(texture, lin ? SDL_ScaleModeLinear : SDL_ScaleModeNearest) == 0)
+                s_frame_texture_filtered = lin;
+        }
         SDL_RenderClear(renderer);
 
         /* Nearest-filtered presentation uploads only the active area the VDP
@@ -3427,7 +3466,8 @@ session_begin:;
             }
             peer_view_was_active = peer_view_is_active;
         }
-        if (!crt_present(renderer, frame_texture, &src, s_frame_texture_filtered))
+        if (!crt_present(renderer, frame_texture, &src, s_frame_texture_filtered) &&
+            !crisp_present(renderer, frame_texture, &src))
             SDL_RenderCopy(renderer, frame_texture, &src, NULL);
         {   /* development: GENESIS_PRESENT_SNAP=file.png [GENESIS_PRESENT_SNAP_FRAME=n] saves the window */
             static int snap_frame = -2, presented;
@@ -3462,11 +3502,13 @@ session_begin:;
          * after present only paces frame starts: variable simulation/upload
          * time then moves each present and makes scrolling judder. The guest
          * still advances exactly one NTSC tick per iteration. */
+        Uint64 slot0 = SDL_GetPerformanceCounter();
         if (turbo) {
             frame_pacer_reset(&frame_pacer);
         } else {
             Uint64 now = SDL_GetPerformanceCounter();
             Uint64 deadline = frame_pacer_deadline(&frame_pacer, now);
+            slot0 = deadline;
             if (now < deadline) {
                 Uint64 remaining_ms = (deadline - now) * 1000 / perf_frequency;
                 if (remaining_ms > 2)
@@ -3475,7 +3517,32 @@ session_begin:;
                     ;
             }
         }
+        vsync_apply(renderer, target_fps);   /* (crt_present.h: auto off on high-refresh panels) */
         SDL_RenderPresent(renderer);
+        for (int k = 1; k < interp_n; ++k) {  /* the rest of this tick's in-between frames */
+            if (!interp_draw((double)k / interp_n)) break;
+            const uint32_t *isrc = s_interp_buf;
+            if (s_color_lut_on) {
+                color_lut_map_frame(&s_color_lut, isrc, s_present_buf, s_screen_width, s_screen_height,
+                                    MAX_SCREEN_WIDTH);
+                isrc = s_present_buf;
+            }
+            SDL_UpdateTexture(texture, NULL, isrc, MAX_SCREEN_WIDTH * (int)sizeof(uint32_t));
+            SDL_RenderClear(renderer);
+            if (!crt_present(renderer, texture, &src, s_frame_texture_filtered) &&
+                !crisp_present(renderer, texture, &src))
+                SDL_RenderCopy(renderer, texture, &src, NULL);
+            Uint64 when = slot0 + (Uint64)((double)k * (double)frame_pacer.period / interp_n);
+            Uint64 now = SDL_GetPerformanceCounter();
+            if (now < when) {
+                Uint64 remaining_ms = (when - now) * 1000 / perf_frequency;
+                if (remaining_ms > 2) SDL_Delay((Uint32)(remaining_ms - 1));
+                while (SDL_GetPerformanceCounter() < when)
+                    ;
+            }
+            SDL_RenderPresent(renderer);
+        }
+        s_work_start = SDL_GetPerformanceCounter();
         }
         FRAME_PHASE(6);
 #if GEN_ENABLE_TRACE

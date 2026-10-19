@@ -351,19 +351,39 @@ static double rab__find_loop_len(const rab_bridge *b, int64_t end_i) {
     int W = Lmin; if (W < 1) W = 1;
     int64_t oldest = (int64_t)b->in_count - b->cap + b->half + 2;
     if (oldest < (int64_t)b->half) oldest = (int64_t)b->half;
-    while (Lmax > Lmin && (end_i - Lmax - W) < oldest) Lmax--;
-    if ((end_i - Lmax - W) < oldest) return (double)Lmin;
+    if (end_i - Lmax - W < oldest) Lmax = (int)(end_i - W - oldest);
+    if (Lmax < Lmin || end_i - Lmax - W < oldest) return (double)Lmin;
+    /* This runs inside the device callback, under the lock audio_flush takes:
+     * an exhaustive search at a ~224 kHz source rate (thousands of lags x
+     * thousands of samples, two 64-bit modulos each) took 30-85 ms, starved
+     * the producer, caused the next underrun and so the next search — a
+     * self-sustaining ~20 fps collapse. Pitch-scale correlation is smooth, so
+     * score every D-th lag on a D-decimated window, then refine the best lag
+     * one frame at a time. D keeps an effective ~24 kHz search. */
+    int D = (int)(sr / 24000.0); if (D < 1) D = 1;
+    int64_t cap = b->cap;
+#define RAB_LAG_SCORE(L_, out_) do {                                            \
+        double num_ = 0.0, d1_ = 0.0, d2_ = 0.0;                                 \
+        int64_t ia_ = end_i % cap, ic_ = (end_i - (L_)) % cap;                    \
+        for (int k_ = 0; k_ < W; k_ += D) {                                      \
+            float a_ = b->ring[ia_ * ch], c_ = b->ring[ic_ * ch];                \
+            num_ += (double)a_ * c_; d1_ += (double)a_ * a_; d2_ += (double)c_ * c_; \
+            ia_ -= D; if (ia_ < 0) ia_ += cap;                                   \
+            ic_ -= D; if (ic_ < 0) ic_ += cap;                                   \
+        }                                                                        \
+        (out_) = num_ / (sqrt(d1_ * d2_) + 1e-9);                                \
+    } while (0)
     double best = -1e30; int bestL = Lmin;
-    for (int L = Lmin; L <= Lmax; ++L) {
-        double num = 0.0, d1 = 0.0, d2 = 0.0;
-        for (int k = 0; k < W; ++k) {
-            float a = b->ring[((end_i - k)     % b->cap) * ch];
-            float c = b->ring[((end_i - L - k) % b->cap) * ch];
-            num += (double)a * c; d1 += (double)a * a; d2 += (double)c * c;
-        }
-        double r = num / (sqrt(d1 * d2) + 1e-9);
+    for (int L = Lmin; L <= Lmax; L += D) {
+        double r; RAB_LAG_SCORE(L, r);
         if (r > best) { best = r; bestL = L; }
     }
+    int lo = bestL - D < Lmin ? Lmin : bestL - D, hi = bestL + D > Lmax ? Lmax : bestL + D;
+    for (int L = lo; L <= hi; ++L) {
+        double r; RAB_LAG_SCORE(L, r);
+        if (r > best) { best = r; bestL = L; }
+    }
+#undef RAB_LAG_SCORE
     return (double)bestL;
 }
 

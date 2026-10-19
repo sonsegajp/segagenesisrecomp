@@ -190,6 +190,137 @@ static void crt_draw_curved(SDL_Renderer *r, SDL_Texture *t, int lw, int lh, flo
     SDL_RenderGeometry(r, t, v, (GX + 1) * (GY + 1), idx, n);
 }
 
+/* ---- Vsync (genesis_present_set_vsync, or GENESIS_VSYNC=auto|on|off) -----
+ * The runner paces frames itself (frame_pacer.h). Vsync on top only helps a
+ * display running near the game's rate (alignment, no tearing). On a
+ * high-refresh panel the pacer already lands every frame, and some drivers
+ * block a vsync present far longer than one refresh: D3D11 windowed on an
+ * Intel iGPU at 144 Hz took ~26 ms per present, holding the game near 32 fps
+ * (60.0 fps with vsync off). Auto keeps vsync only near the game's rate,
+ * re-checked every two seconds so it follows the window between displays. */
+static int s_vsync_mode, s_vsync_env = -2, s_vsync_applied = -1, s_vsync_last_mode = -1;
+static unsigned s_vsync_tick;
+void genesis_present_set_vsync(int mode) { s_vsync_mode = mode >= 0 && mode <= 2 ? mode : 0; }
+
+static void vsync_apply(SDL_Renderer *r, double target_fps)
+{
+    if (s_vsync_env == -2) {
+        const char *e = getenv("GENESIS_VSYNC");
+        s_vsync_env = !e || !*e ? -1 : !SDL_strcasecmp(e, "on") ? 1 : !SDL_strcasecmp(e, "off") ? 2 : 0;
+    }
+    int mode = s_vsync_env >= 0 ? s_vsync_env : s_vsync_mode;
+    if (mode == s_vsync_last_mode && (s_vsync_tick++ % 120)) return;
+    s_vsync_last_mode = mode;
+    int want = mode == 1;
+    if (mode == 0) {
+        SDL_DisplayMode dm;
+        SDL_Window *w = SDL_RenderGetWindow(r);
+        int d = w ? SDL_GetWindowDisplayIndex(w) : -1;
+        want = d >= 0 && SDL_GetCurrentDisplayMode(d, &dm) == 0 && dm.refresh_rate > 0 &&
+               fabs((double)dm.refresh_rate - target_fps) < 2.0;
+    }
+    if (want != s_vsync_applied && SDL_RenderSetVSync(r, want) == 0) {
+        s_vsync_applied = want;
+        fprintf(stderr, "[VIDEO] vsync %s\n", want ? "on" : "off (frame pacer only)");
+    }
+}
+
+/* ---- Frame interpolation (genesis_present_set_interpolation) -------------
+ * 0 off; otherwise a display rate in Hz to fill (120, 144...), or -1 for the
+ * display's own refresh. The game draws in-between frames
+ * (GameVideo.interpolate, from the previous tick to the latest: one tick of
+ * latency); each 60 Hz tick presents n of them, n = rate / tick rate (at most
+ * 4), fewer when the measured draw time would not fit the tick. */
+static int s_interp_hz;
+static double s_interp_cost_ms = 4.0;     /* running estimate of one in-between draw */
+void genesis_present_set_interpolation(int hz) { s_interp_hz = hz; }
+
+static int interp_slots(SDL_Renderer *r, double target_fps, double work_ms)
+{
+    if (!s_interp_hz || target_fps <= 0) return 1;
+    int hz = s_interp_hz;
+    if (hz < 0) {
+        SDL_DisplayMode dm;
+        SDL_Window *w = SDL_RenderGetWindow(r);
+        int d = w ? SDL_GetWindowDisplayIndex(w) : -1;
+        hz = d >= 0 && SDL_GetCurrentDisplayMode(d, &dm) == 0 && dm.refresh_rate > 0 ? dm.refresh_rate : 60;
+    }
+    int n = (int)((double)hz / target_fps + 0.5);
+    if (n > 4) n = 4;
+    double budget = 1000.0 / target_fps - work_ms - 1.5;
+    int want = n;
+    while (n > 1 && n * s_interp_cost_ms > budget) n--;
+    /* Backed off, nothing re-measures the draw: let the estimate decay so a
+     * one-off slow draw (a disk hiccup) can't switch interpolation off for good. */
+    if (n < want) s_interp_cost_ms *= 0.97;
+    return n < 1 ? 1 : n;
+}
+
+/* ---- Scaling (genesis_present_set_scaling / _integer_scale) -------------
+ * A game may choose how the frame reaches the window, live:
+ *   0 sharp  — nearest neighbour (blocky, uneven pixel widths off-integer);
+ *   1 smooth — bilinear (soft);
+ *   2 crisp  — nearest to the largest whole multiple that fits, then bilinear
+ *              for the remainder: even, sharp pixels without shimmer.
+ * -1 (the default) leaves settings.ini's linear_filter in charge. Integer
+ * scaling snaps the picture to whole multiples (letterboxed). */
+static int s_scale_mode = -1, s_integer_scale;
+static SDL_Texture *s_crisp;
+static int s_crisp_w, s_crisp_h;
+void genesis_present_set_scaling(int mode) { s_scale_mode = mode >= 0 && mode <= 2 ? mode : -1; }
+void genesis_present_set_integer_scale(int on) { s_integer_scale = on != 0; }
+/* The filter the frame texture should use (-1: no opinion). */
+static int scale_wants_linear(void) { return s_scale_mode < 0 ? -1 : s_scale_mode == 1; }
+
+static void scale_apply(SDL_Renderer *r)
+{
+    if (SDL_RenderGetIntegerScale(r) != (s_integer_scale ? SDL_TRUE : SDL_FALSE))
+        SDL_RenderSetIntegerScale(r, s_integer_scale ? SDL_TRUE : SDL_FALSE);
+}
+
+/* Crisp: 0 = not handled (draw as usual). */
+static int crisp_present(SDL_Renderer *r, SDL_Texture *tex, const SDL_Rect *src)
+{
+    if (s_scale_mode != 2) {
+        if (s_crisp) { SDL_DestroyTexture(s_crisp); s_crisp = NULL; s_crisp_w = s_crisp_h = 0; }
+        return 0;
+    }
+    SDL_RendererInfo info;
+    if (SDL_GetRendererInfo(r, &info) != 0 || !(info.flags & SDL_RENDERER_TARGETTEXTURE)) return 0;
+    int w, h, lw, lh;
+    crt_phys_size(r, &w, &h, &lw, &lh);
+    if (src->w <= 0 || src->h <= 0 || lw <= 0 || lh <= 0) return 0;
+    /* the frame covers the logical canvas: its physical size per source pixel */
+    int kx = w / src->w, ky = h / src->h;
+    if (kx < 1) kx = 1;
+    if (ky < 1) ky = 1;
+    int tw = src->w * kx, th = src->h * ky;
+    if (tw > 16384 || th > 16384) return 0;
+    if (!s_crisp || tw != s_crisp_w || th != s_crisp_h) {
+        if (s_crisp) SDL_DestroyTexture(s_crisp);
+        s_crisp = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, tw, th);
+        if (!s_crisp) { s_crisp_w = s_crisp_h = 0; return 0; }
+        s_crisp_w = tw;
+        s_crisp_h = th;
+    }
+    SDL_Texture *old = SDL_GetRenderTarget(r);
+    SDL_BlendMode mode = SDL_BLENDMODE_BLEND;
+    SDL_GetTextureBlendMode(tex, &mode);
+    SDL_ScaleMode sm = SDL_ScaleModeNearest;
+    SDL_GetTextureScaleMode(tex, &sm);
+    SDL_SetRenderTarget(r, s_crisp);
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+    SDL_SetTextureScaleMode(tex, SDL_ScaleModeNearest);
+    SDL_RenderCopy(r, tex, src, NULL);
+    SDL_SetTextureScaleMode(tex, sm);
+    SDL_SetTextureBlendMode(tex, mode);
+    SDL_SetRenderTarget(r, old);
+    SDL_SetTextureBlendMode(s_crisp, SDL_BLENDMODE_NONE);
+    SDL_SetTextureScaleMode(s_crisp, SDL_ScaleModeLinear);
+    SDL_RenderCopy(r, s_crisp, NULL, NULL);
+    return 1;
+}
+
 /* Present `src` of `tex` through the active preset. 0 = not handled (draw as usual). */
 static int crt_present(SDL_Renderer *r, SDL_Texture *tex, const SDL_Rect *src, int filtered)
 {

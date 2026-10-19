@@ -44,6 +44,15 @@ void audio_flush(uint32_t wall_frame, int realtime,
                  const int16_t *psg_buf, size_t psg_frames);
 
 /*
+ * Optional game-owned stereo source (e.g. CD audio): called once per flush
+ * with the frame's interleaved stereo mix at the internal mix rate (`rate`,
+ * the PSG rate), which it ADDS into with saturation. Runs on the emulation
+ * thread, paced by emulated frames. NULL (the default) disables it.
+ */
+typedef void (*AudioExtraSource)(int16_t *mix_stereo, size_t frames, double rate);
+void audio_set_extra_source(AudioExtraSource fn);
+
+/*
  * WAV capture: write mixed stereo output to a .wav file.
  * Call audio_wav_start("out.wav") to begin, audio_wav_stop() to finalize.
  * While active, audio_flush() writes to both SDL and the WAV file.

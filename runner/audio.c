@@ -113,9 +113,14 @@ static uint32_t s_wav_data_bytes = 0;
  * PSG rate ~223721 Hz / 50 Hz (PAL) ≈ 4475 frames.  Double for headroom. */
 #define OUT_BUF_FRAMES 16384
 static int16_t s_out[OUT_BUF_FRAMES * 2];
+/* Opt-in game-owned stereo source (audio_set_extra_source), at the mix rate. */
+static AudioExtraSource s_extra;
+static double s_mix_rate;
+void audio_set_extra_source(AudioExtraSource fn) { s_extra = fn; }
 
 int audio_init(int psg_sample_rate)
 {
+    s_mix_rate = (double)psg_sample_rate;
     SDL_AudioSpec want, got;
     SDL_memset(&want, 0, sizeof(want));
     /* Open at a normal host rate and let the DRC bridge own the (large)
@@ -283,6 +288,11 @@ void audio_flush(uint32_t wall_frame, int realtime,
      * upsampled to PSG rate). This is the single mix, a FIXED conversion, so it
      * no longer crackles. The DRC bridge owns the downsample and the servo. */
     MIX_INTO(psg_frames);
+
+    /* A game's own stream (CD audio, ...) adds into the same frame, before the
+     * WAV tap: emulated-frame paced, so it stays deterministic too. */
+    if (s_extra)
+        s_extra(s_out, psg_frames, s_mix_rate);
 
     /* WAV capture taps the GENERATED stream at ratio 1, before master volume
      * and before the bridge — WAV content stays bit-deterministic across runs

@@ -26,4 +26,9 @@ typedef struct GameVideo {
      * of aspect mode; must not advance simulation or mutate the guest. */
     void (*overlay_scanline)(const struct GVDP *vdp, int line,
                              uint32_t *out, int width);
+    /* Optional: an in-between frame for a high-refresh display, at phase t
+     * from the previous frame (0) to the latest (1), drawn at the current
+     * custom width into `frame` (rows `stride` pixels apart), overlays
+     * included. Return 0 when it can't (the runner re-presents the frame). */
+    int (*interpolate)(double t, uint32_t *frame, int stride, int height);
 } GameVideo;
