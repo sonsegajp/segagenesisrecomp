@@ -2,6 +2,9 @@
  * input_map.c — per-player Genesis controller binding model (see input_map.h).
  */
 #include "input_map.h"
+#ifdef GENESIS_TOUCH_OVERLAY
+#include "touch_overlay.h"
+#endif
 #include "gamepad.h"
 
 #include <SDL2/SDL.h>
@@ -115,6 +118,9 @@ uint16_t input_current_mask(int player)
     uint16_t m = 0;
     if (pi->device & INPUT_DEV_KEYBOARD) m |= input_map_key_mask(player);
     if (pi->device & INPUT_DEV_GAMEPAD)  m |= gamepad_player_mask(player);
+#ifdef GENESIS_TOUCH_OVERLAY
+    if (player == 0) m |= touch_overlay_mask();
+#endif
     return m;
 }
 

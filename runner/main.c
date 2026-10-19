@@ -178,6 +178,9 @@ static int run_picker_cmd(const char *cmd, char *out, size_t max_len)
 #include "game_layout.h"
 #include "gamepad.h"
 #include "input_map.h"
+#ifdef GENESIS_TOUCH_OVERLAY
+#include "touch_overlay.h"     /* on-screen pad (the Android build) */
+#endif
 #include "app_config.h"
 #if RECOMP_LAUNCHER
 /* Shared recomp-ui launcher C ABI. The header is supplied through the game
@@ -2920,6 +2923,9 @@ session_begin:;
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             gamepad_handle_event(&ev);
+#ifdef GENESIS_TOUCH_OVERLAY
+            touch_overlay_event(&ev);
+#endif
 #if RECOMP_LAUNCHER
             if (ev.type == SDL_KEYDOWN && ev.key.keysym.sym == SDLK_ESCAPE && !recomp_runtime_ui_is_open(s_runtime_ui.ui)) {
                 recomp_runtime_ui_open(s_runtime_ui.ui); continue;
@@ -3518,6 +3524,9 @@ session_begin:;
             }
         }
         vsync_apply(renderer, target_fps);   /* (crt_present.h: auto off on high-refresh panels) */
+#ifdef GENESIS_TOUCH_OVERLAY
+        touch_overlay_draw(renderer);
+#endif
         SDL_RenderPresent(renderer);
         for (int k = 1; k < interp_n; ++k) {  /* the rest of this tick's in-between frames */
             if (!interp_draw((double)k / interp_n)) break;
@@ -3540,6 +3549,9 @@ session_begin:;
                 while (SDL_GetPerformanceCounter() < when)
                     ;
             }
+#ifdef GENESIS_TOUCH_OVERLAY
+            touch_overlay_draw(renderer);
+#endif
             SDL_RenderPresent(renderer);
         }
         s_work_start = SDL_GetPerformanceCounter();

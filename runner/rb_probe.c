@@ -115,7 +115,7 @@ int rb_probe_armed(void)
 
 /* ---- carrier finders ------------------------------------------------------- */
 
-#if defined(__linux__) && defined(__GNUC__)
+#if defined(__linux__) && defined(__GNUC__) && !defined(__ANDROID__)   /* (a shared library: no __data_start) */
 #define RB_PROBE_HAVE_IMAGE 1
 extern char __data_start[], _edata[], __bss_start[], _end[];
 static uint8_t *s_img;
