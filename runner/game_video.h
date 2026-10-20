@@ -31,4 +31,11 @@ typedef struct GameVideo {
      * custom width into `frame` (rows `stride` pixels apart), overlays
      * included. Return 0 when it can't (the runner re-presents the frame). */
     int (*interpolate)(double t, uint32_t *frame, int stride, int height);
+    /* Optional: rows the custom picture adds above and below the native
+     * lines, for a window taller than the picture's shape (an unfolded
+     * foldable, a tablet held upright). Asked each frame after width(). The
+     * runner hands them to scanline/overlay_scanline as lines -top..-1 and
+     * native_h..native_h+bottom-1 (native NULL), after the frame's last
+     * native line; output row = line + top. Not in interlace modes. */
+    void (*extent)(int *top, int *bottom);
 } GameVideo;

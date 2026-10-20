@@ -1,8 +1,9 @@
 /*
  * touch_overlay.c — an on-screen Genesis pad for touch screens (see
  * touch_overlay.h). Sizes follow the screen's height, so the controls keep
- * their size in any aspect; positions hug the corners, over the letterbox
- * bars a 16:9 picture leaves on a wider phone.
+ * their size in any aspect (on a squarer or upright screen, a foldable's,
+ * they shrink until the pad and the buttons fit side by side); positions hug
+ * the corners, over the letterbox bars a 16:9 picture leaves on a wider phone.
  */
 #include "touch_overlay.h"
 
@@ -37,8 +38,13 @@ void touch_overlay_configure(int enabled, float scale)
     s_scale = scale > 0.3f && scale < 3.0f ? scale : 1.0f;
 }
 
-/* a size: a fraction of the screen's height, at the chosen scale */
-static float u(float f) { return f * s_h * s_scale; }
+/* a size: a fraction of the screen's height, at the chosen scale (the
+ * layout needs about 1.1 heights across: narrower, the width sets it) */
+static float u(float f)
+{
+    float base = s_w < s_h * 1.25f ? s_w / 1.25f : (float)s_h;
+    return f * base * s_scale;
+}
 
 /* ---- layout (pixels, from the output size) ----------------------------- */
 typedef struct { float x, y, r; } Circle;
@@ -248,6 +254,8 @@ void touch_overlay_draw(SDL_Renderer *r)
     SDL_RenderGetScale(r, &sx, &sy);
     SDL_BlendMode bm;
     SDL_GetRenderDrawBlendMode(r, &bm);
+    Uint8 cr, cg, cb, ca;                             /* (the next frame's clear uses it) */
+    SDL_GetRenderDrawColor(r, &cr, &cg, &cb, &ca);
     SDL_RenderSetLogicalSize(r, 0, 0);
     SDL_RenderSetViewport(r, NULL);
     SDL_RenderSetScale(r, 1, 1);
@@ -290,6 +298,7 @@ void touch_overlay_draw(SDL_Renderer *r)
     SDL_RenderFillRectF(r, &b2);
 
     SDL_SetRenderDrawBlendMode(r, bm);
+    SDL_SetRenderDrawColor(r, cr, cg, cb, ca);
     if (lw > 0 && lh > 0) SDL_RenderSetLogicalSize(r, lw, lh);
     else { SDL_RenderSetViewport(r, &vp); SDL_RenderSetScale(r, sx, sy); }
 }

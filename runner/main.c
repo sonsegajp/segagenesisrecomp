@@ -218,6 +218,8 @@ static int s_frame_stride = NATIVE_SCREEN_STRIDE;
 static uint32_t s_native_storage[NATIVE_SCREEN_STRIDE * MAX_SCREEN_HEIGHT];
 static uint32_t *s_framebuf = s_native_storage; /* ARGB8888 */
 static int s_custom_width;
+static int s_custom_top, s_custom_bottom;   /* GameVideo.extent: rows above/below the native lines */
+static int s_screen_extra;                  /* those rows, in s_screen_height */
 static SDL_Renderer *s_video_renderer;
 static SDL_Texture **s_video_texture;
 
@@ -432,7 +434,7 @@ static int s_screen_height = 224;
 static int netplay_peer_view_active(void)
 {
 #if GENESIS_HAS_RECOMP_NET && GENESIS_NETPLAY_PEER_VIEW
-    return genesis_netplay_active() && s_screen_height > 240 &&
+    return genesis_netplay_active() && s_screen_height - s_screen_extra > 240 &&
            (s_screen_height & 1) == 0;
 #else
     return 0;
@@ -469,7 +471,7 @@ static int display_logical_height(void)
 {
     if (netplay_peer_view_active())
         return s_screen_height / 2;
-    if (s_screen_height > 240 && s_interlace_display_mode == INTERLACE_DISPLAY_TV)
+    if (s_screen_height - s_screen_extra > 240 && s_interlace_display_mode == INTERLACE_DISPLAY_TV)
         return (s_screen_height + 1) / 2;
     return s_screen_height;
 }
@@ -563,6 +565,20 @@ static void scanline_rendered_cb(void *user_data,
 
 #include "genesis_machine.h"
 /* Own-backend scanline sink: copy our VDP's rendered ARGB row to the framebuf. */
+/* GameVideo.extent's rows: after the frame's last native line, the ones
+ * above it and the ones below, drawn by the game with no native row. */
+static void custom_extra_rows(int native_h, int native_w)
+{
+    for (int line = -s_custom_top; line < native_h + s_custom_bottom; line++) {
+        if (line == 0) line = native_h;
+        if (line >= native_h + s_custom_bottom) break;
+        uint32_t *row = s_framebuf + (line + s_custom_top) * MAX_SCREEN_WIDTH;
+        g_game_spec.video->scanline(&g_machine.vdp, line, NULL, native_w, row, s_custom_width);
+        if (g_game_spec.video->overlay_scanline)
+            g_game_spec.video->overlay_scanline(&g_machine.vdp, line, row, s_custom_width);
+    }
+}
+
 static void own_scanline_sink(void *u, int line, const uint32_t *argb, int width)
 {
     (void)u;
@@ -570,8 +586,9 @@ static void own_scanline_sink(void *u, int line, const uint32_t *argb, int width
      * returns w + 2*extra). Track it so the present path scales to the wider
      * image, mirroring the clownmdemu scanline_rendered_cb. */
     s_screen_width = s_custom_width ? s_custom_width : width;
-    if (line < 0 || line >= MAX_SCREEN_HEIGHT) return;
-    uint32_t *row = s_framebuf + line * MAX_SCREEN_WIDTH;
+    int out_line = line + (s_custom_width ? s_custom_top : 0);
+    if (line < 0 || out_line >= MAX_SCREEN_HEIGHT) return;
+    uint32_t *row = s_framebuf + out_line * MAX_SCREEN_WIDTH;
     if (s_custom_width && g_game_spec.video) {
         g_game_spec.video->scanline(&g_machine.vdp, line, argb, width, row, s_custom_width);
     } else {
@@ -580,11 +597,15 @@ static void own_scanline_sink(void *u, int line, const uint32_t *argb, int width
     }
     if (g_game_spec.video && g_game_spec.video->overlay_scanline)
         g_game_spec.video->overlay_scanline(&g_machine.vdp, line, row, s_screen_width);
+    if (s_custom_width && (s_custom_top || s_custom_bottom) &&
+        line == gvdp_output_height(&g_machine.vdp) - 1)
+        custom_extra_rows(line + 1, width);
 }
 
 static void custom_video_prepare(void)
 {
     s_custom_width = 0;
+    s_custom_top = s_custom_bottom = 0;
     if (!g_game_spec.video || !g_game_spec.video->enabled()) return;
     int dw = 0, dh = 0;
     if (s_video_renderer) SDL_GetRendererOutputSize(s_video_renderer, &dw, &dh);
@@ -631,6 +652,15 @@ static void custom_video_prepare(void)
         s_framebuf = frame; s_present_buf = present; s_frame_stride = width;
     }
     s_custom_width = width;
+    if (g_game_spec.video->extent) {                 /* (a taller window: rows above and below) */
+        int top = 0, bottom = 0, nh = gvdp_output_height(&g_machine.vdp);
+        g_game_spec.video->extent(&top, &bottom);
+        if (top < 0) top = 0;
+        if (bottom < 0) bottom = 0;
+        if (nh > 240 || nh + top + bottom > MAX_SCREEN_HEIGHT) top = bottom = 0;
+        s_custom_top = top;
+        s_custom_bottom = bottom;
+    }
 }
 
 /* An in-between frame from the game (GameVideo.interpolate) into s_interp_buf,
@@ -2462,6 +2492,11 @@ int main(int argc, char *argv[])
         win_w = ws_canvas_w() * win_scale;
         win_h = win_w * WS_ASPECT_H / WS_ASPECT_W;   /* true 16:9 */
     }
+    {   /* development: GENESIS_WINDOW=WxH, the window's first size (shape tests) */
+        const char *g = getenv("GENESIS_WINDOW");
+        int gw = 0, gh = 0;
+        if (g && sscanf(g, "%dx%d", &gw, &gh) == 2 && gw > 0 && gh > 0) { win_w = gw; win_h = gh; }
+    }
     /* Scripted launcher tests must stay hidden after the handoff to gameplay. */
     int test_hidden = getenv("LNG_SCRIPT") && getenv("LNG_TEST_HIDDEN");
     Uint32 win_flags = ((benchmark_frames || test_hidden) ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN)
@@ -3130,7 +3165,8 @@ session_begin:;
           /* Output height doubles in interlace mode 2 (S2 2P split-screen);
            * the existing interlace display modes (tv squash / raw) take over
            * from here, same as the clownmdemu path. */
-          s_screen_height = gvdp_output_height(&g_machine.vdp);
+          s_screen_extra = s_custom_width ? s_custom_top + s_custom_bottom : 0;
+          s_screen_height = gvdp_output_height(&g_machine.vdp) + s_screen_extra;
           if (!completed) {                        /* reverse-debug quit */
               fprintf(stderr, "[session] tick stopped by the post-drain hook (reverse-debug quit)\n");
               running = 0; break;
