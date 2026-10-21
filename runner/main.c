@@ -654,7 +654,7 @@ static void custom_video_prepare(void)
     s_custom_width = width;
     if (g_game_spec.video->extent) {                 /* (a taller window: rows above and below) */
         int top = 0, bottom = 0, nh = gvdp_output_height(&g_machine.vdp);
-        g_game_spec.video->extent(&top, &bottom);
+        g_game_spec.video->extent(&g_machine.vdp, &top, &bottom);
         if (top < 0) top = 0;
         if (bottom < 0) bottom = 0;
         if (nh > 240 || nh + top + bottom > MAX_SCREEN_HEIGHT) top = bottom = 0;

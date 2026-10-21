@@ -36,6 +36,8 @@ typedef struct GameVideo {
      * foldable, a tablet held upright). Asked each frame after width(). The
      * runner hands them to scanline/overlay_scanline as lines -top..-1 and
      * native_h..native_h+bottom-1 (native NULL), after the frame's last
-     * native line; output row = line + top. Not in interlace modes. */
-    void (*extent)(int *top, int *bottom);
+     * native line; output row = line + top. Not in interlace modes. `vdp`
+     * holds the scroll this frame will show (the game's own RAM can already
+     * be a frame ahead: its next logic may start in the vertical blank). */
+    void (*extent)(const struct GVDP *vdp, int *top, int *bottom);
 } GameVideo;
